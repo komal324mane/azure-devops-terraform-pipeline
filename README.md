@@ -1,8 +1,37 @@
+<div align="center">
+
 # Azure DevOps Terraform Pipeline
 
-A Windows self-hosted-agent-compatible Azure Pipelines example for Terraform format checks, validation, tfsec, Checkov, remote-state planning, plan artifacts, and an explicitly disabled production apply stage.
+### Secure, reviewed infrastructure delivery on a Windows agent
 
-> The included Terraform example creates an Azure resource group only if someone deliberately enables the protected apply stage and approves it. No Azure resources are provisioned by this repository or by local validation.
+![Azure DevOps](https://img.shields.io/badge/Azure_DevOps-YAML-0078D7?style=for-the-badge&logo=azuredevops&logoColor=white)
+![Terraform](https://img.shields.io/badge/Terraform-Plan%20%26%20Validate-844FBA?style=for-the-badge&logo=terraform&logoColor=white)
+![Security](https://img.shields.io/badge/DevSecOps-tfsec%20%7C%20Checkov-2563EB?style=for-the-badge)
+
+**A practical CI/CD example with validation, security gates, remote state, and an approval-protected apply.**
+
+</div>
+
+> [!IMPORTANT]
+> Production apply is **disabled by default**. The Terraform sample can create a real Azure resource group only after deliberate configuration, enablement, and environment approval. No resource is provisioned automatically.
+
+## At a glance
+
+| Stage | What it does |
+| --- | --- |
+| **Validate** | Terraform format, backend-free init, validate, tfsec, Checkov |
+| **Plan** | Azure-authenticated remote-state plan and restricted artifact |
+| **Apply** | Disabled by default; requires explicit enablement and production checks |
+| **Agent** | Windows self-hosted `Terraform_pool`, using PowerShell/PowerShell Core |
+
+## Contents
+
+- [Workflow](#workflow)
+- [Agent requirements](#agent-requirements)
+- [Configure Azure DevOps](#configure-azure-devops)
+- [Pipeline behavior](#pipeline-behavior)
+- [Local validation](#local-validation)
+- [Troubleshooting](#troubleshooting)
 
 ## Workflow
 
@@ -22,9 +51,9 @@ flowchart LR
 - Windows self-hosted Azure DevOps agent registered in the `Terraform_pool` pool
 - `TerraformInstaller@1` task available to the organization
 - Python 3.12 and `tar.exe` available on the agent
-- Network access to HashiCorp releases, PyPI, Chocolatey, Azure, and the configured state storage endpoint
+- Network access to HashiCorp releases, PyPI, GitHub Releases, Azure, and the configured state storage endpoint
 
-The pipeline uses `PowerShell@2` with `pscore` for scripts and Windows-compatible paths. The included installer downloads a pinned tfsec release from the official GitHub release, verifies its published SHA-256 checksum, and extracts it to the agent temp directory.
+The pipeline uses `PowerShell@2` with `pscore` and Windows-compatible paths. Its installer downloads a pinned tfsec release from the official GitHub release, verifies the published SHA-256 checksum, and extracts it to the agent temp directory.
 
 ## Configure Azure DevOps
 
@@ -67,3 +96,11 @@ The local commands do not authenticate to Azure or provision resources. Run scan
 - **TerraformInstaller task missing:** install/authorize the Terraform task extension for the Azure DevOps organization.
 - **Scanner install fails:** verify Python/tar availability and outbound access from `Terraform_pool`.
 - **Apply stage skipped:** expected by default; check `enableProductionApply` and the `production` environment approvals only after review.
+
+---
+
+<div align="center">
+
+Part of the [Azure DevOps portfolio](https://github.com/komal324mane) · [Terraform infrastructure](https://github.com/komal324mane/terraform-azure-infrastructure) · [Security lab](https://github.com/komal324mane/terraform-devsecops-security)
+
+</div>
