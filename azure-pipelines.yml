@@ -1,0 +1,183 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  name: Terraform_pool
+
+variables:
+  terraformVersion: '1.9.8'
+  tfsecVersion: '1.28.14'
+  checkovVersion: '3.2.495'
+  azureServiceConnection: ''
+  stateResourceGroup: ''
+  stateStorageAccount: ''
+  stateContainer: ''
+  stateKey: 'azure-devops-pipeline/dev.tfstate'
+  enableProductionApply: 'false'
+
+stages:
+  - stage: Validate
+    displayName: Validate and scan Terraform
+    jobs:
+      - job: Validate
+        steps:
+          - checkout: self
+            clean: true
+
+          - task: TerraformInstaller@1
+            displayName: Install pinned Terraform
+            inputs:
+              terraformVersion: $(terraformVersion)
+
+          - task: UsePythonVersion@0
+            displayName: Select Python for Checkov
+            inputs:
+              versionSpec: '3.12'
+              addToPath: true
+
+          - task: PowerShell@2
+            displayName: Install pinned Checkov
+            inputs:
+              targetType: inline
+              script: |
+                $ErrorActionPreference = 'Stop'
+                python -m pip install --disable-pip-version-check "checkov==$(checkovVersion)"
+                if ($LASTEXITCODE -ne 0) { throw "Checkov installation failed with exit code $LASTEXITCODE" }
+
+          - task: PowerShell@2
+            displayName: Install pinned tfsec release
+            inputs:
+              targetType: filePath
+              filePath: $(Build.SourcesDirectory)\scripts\Install-Tfsec.ps1
+              arguments: -Version $(tfsecVersion)
+
+          - task: PowerShell@2
+            displayName: Terraform format, backend-free init, and validation
+            inputs:
+              targetType: inline
+              workingDirectory: $(Build.SourcesDirectory)\infra
+              script: |
+                $ErrorActionPreference = 'Stop'
+                terraform fmt -check -recursive
+                if ($LASTEXITCODE -ne 0) { throw "terraform fmt failed with exit code $LASTEXITCODE" }
+                terraform init -backend=false -input=false
+                if ($LASTEXITCODE -ne 0) { throw "terraform init failed with exit code $LASTEXITCODE" }
+                terraform validate -no-color
+                if ($LASTEXITCODE -ne 0) { throw "terraform validate failed with exit code $LASTEXITCODE" }
+
+          - task: PowerShell@2
+            displayName: tfsec scan
+            inputs:
+              targetType: inline
+              workingDirectory: $(Build.SourcesDirectory)\infra
+              script: |
+                $ErrorActionPreference = 'Stop'
+                tfsec . --no-color
+                if ($LASTEXITCODE -ne 0) { throw "tfsec found issues or failed with exit code $LASTEXITCODE" }
+
+          - task: PowerShell@2
+            displayName: Checkov scan
+            inputs:
+              targetType: inline
+              workingDirectory: $(Build.SourcesDirectory)\infra
+              script: |
+                $ErrorActionPreference = 'Stop'
+                checkov -d . --framework terraform --quiet
+                if ($LASTEXITCODE -ne 0) { throw "Checkov found issues or failed with exit code $LASTEXITCODE" }
+
+  - stage: Plan
+    displayName: Plan with Azure remote state
+    dependsOn: Validate
+    condition: and(succeeded(), ne(variables['azureServiceConnection'], ''), ne(variables['stateResourceGroup'], ''), ne(variables['stateStorageAccount'], ''), ne(variables['stateContainer'], ''))
+    jobs:
+      - job: TerraformPlan
+        steps:
+          - checkout: self
+            clean: true
+
+          - task: TerraformInstaller@1
+            displayName: Install pinned Terraform
+            inputs:
+              terraformVersion: $(terraformVersion)
+
+          - task: AzureCLI@2
+            displayName: Initialize backend and create plan
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: pscore
+              scriptLocation: inlineScript
+              workingDirectory: $(Build.SourcesDirectory)\infra
+              inlineScript: |
+                $ErrorActionPreference = 'Stop'
+                terraform init -input=false `
+                  "-backend-config=resource_group_name=$env:STATE_RESOURCE_GROUP" `
+                  "-backend-config=storage_account_name=$env:STATE_STORAGE_ACCOUNT" `
+                  "-backend-config=container_name=$env:STATE_CONTAINER" `
+                  "-backend-config=key=$env:STATE_KEY" `
+                  "-backend-config=use_azuread_auth=true"
+                if ($LASTEXITCODE -ne 0) { throw "terraform init failed with exit code $LASTEXITCODE" }
+                terraform plan -input=false -no-color -out="$(Build.ArtifactStagingDirectory)\terraform.tfplan"
+                if ($LASTEXITCODE -ne 0) { throw "terraform plan failed with exit code $LASTEXITCODE" }
+            env:
+              STATE_RESOURCE_GROUP: $(stateResourceGroup)
+              STATE_STORAGE_ACCOUNT: $(stateStorageAccount)
+              STATE_CONTAINER: $(stateContainer)
+              STATE_KEY: $(stateKey)
+
+          - task: PublishPipelineArtifact@1
+            displayName: Publish reviewed plan artifact
+            inputs:
+              targetPath: $(Build.ArtifactStagingDirectory)\terraform.tfplan
+              artifact: terraform-plan
+
+  - stage: ProductionApply
+    displayName: Protected production apply (disabled by default)
+    dependsOn: Plan
+    condition: and(succeeded(), eq(variables['enableProductionApply'], 'true'))
+    jobs:
+      - deployment: ApplyProductionPlan
+        displayName: Apply approved production plan
+        environment: production
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  clean: true
+
+                - task: TerraformInstaller@1
+                  displayName: Install pinned Terraform
+                  inputs:
+                    terraformVersion: $(terraformVersion)
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: Download plan from this run
+                  inputs:
+                    artifact: terraform-plan
+                    path: $(Pipeline.Workspace)\terraform-plan
+
+                - task: AzureCLI@2
+                  displayName: Apply the reviewed plan
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: pscore
+                    scriptLocation: inlineScript
+                    workingDirectory: $(Build.SourcesDirectory)\infra
+                    inlineScript: |
+                      $ErrorActionPreference = 'Stop'
+                      terraform init -input=false `
+                        "-backend-config=resource_group_name=$env:STATE_RESOURCE_GROUP" `
+                        "-backend-config=storage_account_name=$env:STATE_STORAGE_ACCOUNT" `
+                        "-backend-config=container_name=$env:STATE_CONTAINER" `
+                        "-backend-config=key=$env:STATE_KEY" `
+                        "-backend-config=use_azuread_auth=true"
+                      if ($LASTEXITCODE -ne 0) { throw "terraform init failed with exit code $LASTEXITCODE" }
+                      terraform apply -input=false -no-color "$(Pipeline.Workspace)\terraform-plan\terraform.tfplan"
+                      if ($LASTEXITCODE -ne 0) { throw "terraform apply failed with exit code $LASTEXITCODE" }
+                  env:
+                    STATE_RESOURCE_GROUP: $(stateResourceGroup)
+                    STATE_STORAGE_ACCOUNT: $(stateStorageAccount)
+                    STATE_CONTAINER: $(stateContainer)
+                    STATE_KEY: $(stateKey)
